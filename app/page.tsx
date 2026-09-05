@@ -21,6 +21,7 @@ import {
   type Kind,
   type Ball,
 } from '@/lib/game/physics';
+import { LEVELS, canPlace, bonusAchieved } from '@/lib/game/levels';
 import type { SceneHandle } from '@/lib/game/scene';
 const TOOLS: {
   kind: Kind;
@@ -56,8 +57,45 @@ export default function Home() {
     [error, setError] = useState(''),
     [sound, setSound] = useState(false),
     [stats, setStats] = useState({ time: 0, hits: 0 });
-  const current = useRef({ pieces, tool, phase, selected, sound });
-  current.current = { pieces, tool, phase, selected, sound };
+  const [levelIndex, setLevelIndex] = useState(0),
+    [undoCount, setUndoCount] = useState(0),
+    [hint, setHint] = useState(false),
+    [cleared, setCleared] = useState<Record<string, number>>({});
+  const history = useRef<Piece[][]>([]);
+  const level = LEVELS[levelIndex];
+  const current = useRef({ pieces, tool, phase, selected, sound, level });
+  current.current = { pieces, tool, phase, selected, sound, level };
+  function edit(next: Piece[]) {
+    history.current.push(current.current.pieces.map((p) => ({ ...p })));
+    setUndoCount(history.current.length);
+    current.current.pieces = next;
+    setPieces(next);
+  }
+  function undo() {
+    if (current.current.phase === 'running') return;
+    const previous = history.current.pop();
+    if (!previous) return;
+    reset();
+    current.current.pieces = previous;
+    setPieces(previous);
+    setSelected(null);
+    setUndoCount(history.current.length);
+  }
+  function switchLevel(index: number) {
+    reset();
+    scene.current?.setBoard(LEVELS[index]);
+    setLevelIndex(index);
+    current.current.level = LEVELS[index];
+    current.current.pieces = [];
+    setPieces([]);
+    setSelected(null);
+    setTool(LEVELS[index].tools[0]);
+    setAttempts(0);
+    setHint(false);
+    history.current = [];
+    setUndoCount(0);
+  }
+
   const ball = useRef<Ball | null>(null),
     audio = useRef<AudioContext | null>(null);
   function tone(frequency: number) {
@@ -75,23 +113,23 @@ export default function Home() {
     o.stop(a.currentTime + 0.2);
   }
   function place(slot: number) {
-    if (current.current.phase === 'running') return;
-    ball.current = null;
-    setPhase('editing');
+    const c = current.current;
+    if (c.phase === 'running' || c.level.fixed.some((p) => p.slot === slot))
+      return;
+    if (
+      !c.pieces.some((p) => p.slot === slot) &&
+      !canPlace(c.level, c.pieces, slot, c.tool)
+    )
+      return;
+    reset();
     setSelected(slot);
-    setPieces((prev) =>
-      prev.some((p) => p.slot === slot)
-        ? prev
-        : [
-            ...prev,
-            {
-              slot,
-              kind: current.current.tool,
-              angle: current.current.tool === 'ramp' ? -30 : 0,
-            },
-          ],
-    );
+    if (!c.pieces.some((p) => p.slot === slot))
+      edit([
+        ...c.pieces,
+        { slot, kind: c.tool, angle: c.tool === 'ramp' ? -30 : 0 },
+      ]);
   }
+
   useEffect(() => {
     let disposed = false,
       frame = 0,
@@ -102,6 +140,7 @@ export default function Home() {
         try {
           const view = createScene(mount.current, place);
           scene.current = view;
+          view.setBoard(current.current.level);
           cleanup = view.dispose;
           setReady(true);
           let last = 0,
@@ -120,7 +159,12 @@ export default function Home() {
               accumulator += delta;
               while (accumulator >= STEP && ball.current.status === 'running') {
                 const before = ball.current;
-                ball.current = step(before, current.current.pieces);
+                ball.current = step(
+                  before,
+                  current.current.pieces,
+                  STEP,
+                  current.current.level,
+                );
                 accumulator -= STEP;
                 if (ball.current.hits > before.hits)
                   tone(360 + ball.current.hits * 37);
@@ -128,6 +172,20 @@ export default function Home() {
               setStats({ time: ball.current.time, hits: ball.current.hits });
               if (ball.current.status !== 'running') {
                 setPhase(ball.current.status);
+                if (ball.current.status === 'won') {
+                  const c = current.current;
+                  const score = bonusAchieved(
+                    c.level,
+                    c.pieces,
+                    ball.current.collected,
+                  )
+                    ? 2
+                    : 1;
+                  setCleared((old) => ({
+                    ...old,
+                    [c.level.id]: Math.max(old[c.level.id] ?? 0, score),
+                  }));
+                }
                 tone(ball.current.status === 'won' ? 880 : 160);
                 accumulator = 0;
               }
@@ -153,6 +211,7 @@ export default function Home() {
     scene.current?.setPieces(pieces, selected);
   }, [pieces, selected, ready]);
   function reset() {
+    scene.current?.retainTrail();
     ball.current = null;
     setPhase('editing');
     setStats({ time: 0, hits: 0 });
@@ -163,19 +222,28 @@ export default function Home() {
       audio.current ??= new AudioContext();
       void audio.current.resume();
     }
-    ball.current = initialBall();
+    scene.current?.retainTrail();
+    ball.current = initialBall(level);
     setAttempts((n) => n + 1);
     setPhase('running');
     setSelected(null);
     tone(520);
   }
-  function rotate() {
+  function rotate(delta = 15) {
     if (selected === null || phase === 'running') return;
     reset();
-    setPieces((prev) =>
-      prev.map((p) =>
+    edit(
+      current.current.pieces.map((p) =>
         p.slot === selected
-          ? { ...p, angle: p.angle >= 75 ? -75 : p.angle + 15 }
+          ? {
+              ...p,
+              angle:
+                p.angle + delta > 75
+                  ? -75
+                  : p.angle + delta < -75
+                    ? 75
+                    : p.angle + delta,
+            }
           : p,
       ),
     );
@@ -183,12 +251,17 @@ export default function Home() {
   function remove() {
     if (selected === null || phase === 'running') return;
     reset();
-    setPieces((p) => p.filter((x) => x.slot !== selected));
+    edit(current.current.pieces.filter((x) => x.slot !== selected));
     setSelected(null);
   }
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest('button,a,input')) return;
+      if (e.key.toLowerCase() === 'z' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        undo();
+        return;
+      }
       if (e.code === 'Space') {
         e.preventDefault();
         launch();
@@ -227,6 +300,22 @@ export default function Home() {
           <MoveUpRight size={15} />
         </a>
       </header>
+      <nav className="level-nav" aria-label="选择关卡">
+        {LEVELS.map((l, i) => (
+          <button
+            key={l.id}
+            aria-current={i === levelIndex ? 'step' : undefined}
+            disabled={phase === 'running'}
+            className={i === levelIndex ? 'chosen' : ''}
+            onClick={() => switchLevel(i)}
+          >
+            {l.name}
+            <span>
+              {cleared[l.id] === 2 ? '★★' : cleared[l.id] === 1 ? '★' : ''}
+            </span>
+          </button>
+        ))}
+      </nav>
       <section className="workspace">
         <aside className="toolbox">
           <div className="eyebrow">BUILD SOMETHING PLAYFUL</div>
@@ -235,14 +324,23 @@ export default function Home() {
             <br />
             一点奇思妙想<span>。</span>
           </h1>
-          <p className="intro">
-            摆一段斜坡，加一点弹力。
-            <br />
-            把黄色弹珠送进绿色小窝。
-          </p>
+          <p className="intro">{level.description}</p>
+          <div className="challenge">
+            {levelIndex === 3 ? (
+              '自由试验，不限解法'
+            ) : (
+              <>
+                进阶挑战：
+                {level.star ? '顺路收集空中的星星' : '只用一个零件通关'}{' '}
+                {cleared[level.id] === 2 ? '✓' : ''}
+              </>
+            )}
+          </div>
           <div className="section-label">
             <span>你的零件盒</span>
-            <span>03 TOOLS</span>
+            <span>
+              {pieces.length} / {level.limit} PIECES
+            </span>
           </div>
           <div className="tools">
             {TOOLS.map((t, i) => (
@@ -251,7 +349,7 @@ export default function Home() {
                 className={`tool ${tool === t.kind ? 'active' : ''} ${t.kind}`}
                 aria-pressed={tool === t.kind}
                 onClick={() => setTool(t.kind)}
-                disabled={phase === 'running'}
+                disabled={phase === 'running' || !level.tools.includes(t.kind)}
               >
                 <span className="tool-glyph">{t.glyph}</span>
                 <span>
@@ -270,14 +368,23 @@ export default function Home() {
             </span>
             <div>
               <button
-                onClick={rotate}
+                onClick={() => rotate(-15)}
+                disabled={
+                  !picked || picked.kind === 'spring' || phase === 'running'
+                }
+                title="反向旋转 15°"
+              >
+                −15°
+              </button>
+              <button
+                onClick={() => rotate(15)}
                 disabled={
                   !picked || picked.kind === 'spring' || phase === 'running'
                 }
                 title="旋转 15°（R）"
               >
                 <RotateCw size={17} />
-                旋转
+                +15°
               </button>
               <button
                 onClick={remove}
@@ -289,21 +396,29 @@ export default function Home() {
               </button>
             </div>
           </div>
-          <button
-            className="example-button"
-            disabled={phase === 'running'}
-            onClick={() => {
-              reset();
-              setPieces([
-                { slot: 4, kind: 'ramp', angle: -75 },
-                { slot: 9, kind: 'ramp', angle: -15 },
-                { slot: 10, kind: 'ramp', angle: -45 },
-              ]);
-              setSelected(null);
-            }}
-          >
-            试试一个搭法 <MoveUpRight size={15} />
-          </button>
+          <div className="edit-actions">
+            <button onClick={undo} disabled={!undoCount || phase === 'running'}>
+              <Undo2 size={15} />
+              撤销一步
+            </button>
+            <button onClick={() => setHint((v) => !v)}>
+              {hint ? '收起提示' : '给点提示'}
+            </button>
+          </div>
+          {hint && <p className="hint">{level.hint}</p>}
+          {levelIndex === 3 && (
+            <button
+              className="example-button"
+              disabled={phase === 'running'}
+              onClick={() => {
+                reset();
+                edit(level.solution.map((p) => ({ ...p })));
+                setSelected(null);
+              }}
+            >
+              试试一个搭法 <MoveUpRight size={15} />
+            </button>
+          )}
           <div className="little-note">
             <Sparkles size={18} />
             <p>
@@ -317,7 +432,7 @@ export default function Home() {
           <div className="board-header">
             <div>
               <span className="live-dot" /> THE LITTLE DROP{' '}
-              <span className="level-tag">自由搭建</span>
+              <span className="level-tag">{level.name}</span>
             </div>
             <button
               className="icon-button"
@@ -350,7 +465,28 @@ export default function Home() {
               <>
                 <span className="result-symbol">✦</span>
                 <strong>漂亮！小球到家了。</strong>
-                <span>换一种搭法，再试一次？</span>
+                <span>
+                  {bonusAchieved(
+                    level,
+                    pieces,
+                    ball.current?.collected ?? false,
+                  )
+                    ? '进阶挑战也完成了！'
+                    : '再挑战一下更巧妙的解法？'}
+                </span>
+                {levelIndex < 2 && (
+                  <button
+                    className="next-level"
+                    onClick={() => switchLevel(levelIndex + 1)}
+                  >
+                    下一关 →
+                  </button>
+                )}
+                {levelIndex === 2 && (
+                  <button className="next-level" onClick={() => switchLevel(3)}>
+                    去自由搭建 →
+                  </button>
+                )}
               </>
             ) : phase === 'lost' ? (
               <>
@@ -407,7 +543,7 @@ export default function Home() {
           <button
             onClick={() => {
               reset();
-              setPieces([]);
+              edit([]);
               setSelected(null);
             }}
             disabled={phase === 'running'}
@@ -415,20 +551,24 @@ export default function Home() {
             清空桌面
           </button>
           <span className="divider" />
-          <span>{pieces.length} / 16 个零件</span>
+          <span>
+            {pieces.length} / {level.limit} 个零件 · 虚线为上次轨迹
+          </span>
         </div>
       </footer>
       <details className="accessible-grid">
         <summary>键盘放置零件 / 操作说明</summary>
         <p>
           选择零件后，使用下面的槽位按钮放置或选中。R 旋转，Delete
-          移除，空格放球。试玩中可按“重试”停止。
+          移除，空格放球，Ctrl / ⌘ + Z 撤销。试玩中可按“重试”停止。
         </p>
         <div>
           {SLOTS.map((_, i) => (
             <button
               key={i}
-              disabled={phase === 'running'}
+              disabled={
+                phase === 'running' || level.fixed.some((p) => p.slot === i)
+              }
               onClick={() => place(i)}
             >
               第{Math.floor(i / 4) + 1}行 第{(i % 4) + 1}列

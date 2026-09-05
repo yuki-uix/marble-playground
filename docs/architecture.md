@@ -24,3 +24,7 @@ Ramps and bumpers are capsule line segments. Spring bumpers are circles. Restitu
 Start with README, this document, the current git diff, and the failing behavior. For physics changes, use a concrete layout array and `simulate()` result. For interaction/visual changes, collect actual browser observations and a reproduction sequence. Never infer browser correctness from a passing physics test.
 
 Keep the current layout and simulation evidence separate from prose summaries. Record meaningful revisions and human intervention in `experiments/`, rather than attempting to save the entire chat as project state.
+
+## Puzzle boards
+
+`levels.ts` defines each board's spawn, goal, immutable obstacles, allowed tools, piece budget, hint, optional collectible and verified solution. The same board configuration is passed to simulation and rendering. UI completion is awarded only after simulation reports a win; optional bonus scoring is separate. Layout history stores copied arrays before each edit. The scene owns the previous-run ghost trail, preserving it across layout edits and clearing it on a board change.

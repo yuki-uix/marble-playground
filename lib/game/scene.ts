@@ -1,6 +1,16 @@
 import * as THREE from 'three';
-import { SLOTS, TARGET, initialBall, type Ball, type Piece } from './physics';
+import {
+  SLOTS,
+  TARGET,
+  DEFAULT_BOARD,
+  initialBall,
+  type Board,
+  type Ball,
+  type Piece,
+} from './physics';
 export type SceneHandle = {
+  setBoard: (board: Board) => void;
+  retainTrail: () => void;
   setPieces: (pieces: Piece[], selected: number | null) => void;
   render: (ball: Ball | null, time: number) => void;
   dispose: () => void;
@@ -9,6 +19,7 @@ export function createScene(
   host: HTMLDivElement,
   onSlot: (index: number) => void,
 ): SceneHandle {
+  let board: Board = DEFAULT_BOARD;
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
@@ -138,6 +149,46 @@ export function createScene(
   scene.add(trail);
   let points: THREE.Vector3[] = [];
   let lastTime = -1;
+  const ghost = new THREE.Line(
+    new THREE.BufferGeometry(),
+    new THREE.LineDashedMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.4,
+      dashSize: 0.1,
+      gapSize: 0.08,
+    }),
+  );
+  scene.add(ghost);
+  const star = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.22),
+    mat(0xffeb83, 0.25),
+  );
+  scene.add(star);
+  star.visible = false;
+  function retainTrail() {
+    if (points.length) {
+      ghost.geometry.dispose();
+      ghost.geometry = new THREE.BufferGeometry().setFromPoints(points);
+      ghost.computeLineDistances();
+    }
+    points = [];
+    lastTime = -1;
+    trail.visible = false;
+  }
+  function setBoard(next: Board) {
+    board = next;
+    spawn.position.set(board.start.x, board.start.y, 0.08);
+    cup.position.set(board.target.x, board.target.y - 0.65, 0);
+    points = [];
+    lastTime = -1;
+    ghost.geometry.dispose();
+    ghost.geometry = new THREE.BufferGeometry();
+    trail.visible = false;
+    star.visible = !!board.star;
+    if (board.star) star.position.set(board.star.x, board.star.y, 0.4);
+  }
+
   const confetti = Array.from({ length: 35 }, (_, i) => {
     const m = box(
       0.09,
@@ -167,7 +218,8 @@ export function createScene(
     // Per-piece materials are owned by this subtree.
     disposeTree(piecesGroup);
     piecesGroup.clear();
-    pieces.forEach((p) => {
+    const allPieces = [...board.fixed, ...pieces];
+    allPieces.forEach((p) => {
       const s = SLOTS[p.slot];
       const group = new THREE.Group();
       group.position.set(s.x, s.y, 0.2);
@@ -195,7 +247,13 @@ export function createScene(
           0,
           0,
           0,
-          mat(p.kind === 'ramp' ? 0xffcf55 : 0x86c8ff),
+          mat(
+            board.fixed.some((f) => f.slot === p.slot)
+              ? 0x8995a9
+              : p.kind === 'ramp'
+                ? 0xffcf55
+                : 0x86c8ff,
+          ),
           group,
         );
         for (const x of [-0.71, 0.71]) {
@@ -260,8 +318,10 @@ export function createScene(
   resize();
   return {
     setPieces,
+    setBoard,
+    retainTrail,
     render(ball, time) {
-      const b = ball ?? initialBall();
+      const b = ball ?? initialBall(board);
       ballMesh.position.set(b.x, b.y, 0.35);
       ballMesh.rotation.x = b.y;
       ballMesh.rotation.y = b.x;
@@ -278,13 +338,16 @@ export function createScene(
         trail.geometry = new THREE.BufferGeometry().setFromPoints(points);
       }
       trail.visible = !!ball;
+      star.visible = !!board.star && !b.collected;
+      star.rotation.y = time;
+      star.rotation.z = time * 0.6;
       confetti.forEach((m, i) => {
         m.visible = b.status === 'won';
         if (m.visible) {
           const t = (time * 0.65 + i * 0.17) % 2;
           m.position.set(
-            TARGET.x + Math.sin(i * 8.7) * t * 2,
-            1.1 + Math.cos(i * 3) * t + 3 * t - 2 * t * t,
+            board.target.x + Math.sin(i * 8.7) * t * 2,
+            board.target.y + 0.45 + Math.cos(i * 3) * t + 3 * t - 2 * t * t,
             0.8,
           );
           m.rotation.z = time + i;

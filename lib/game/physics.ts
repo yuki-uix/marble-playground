@@ -7,6 +7,7 @@ export type Ball = {
   vy: number;
   time: number;
   hits: number;
+  collected: boolean;
   status: 'running' | 'won' | 'lost';
 };
 export const RADIUS = 0.19;
@@ -16,22 +17,39 @@ export const SLOTS = Array.from({ length: 16 }, (_, i) => ({
   x: -3 + (i % 4) * 2,
   y: 7.6 - Math.floor(i / 4) * 1.8,
 }));
-export const initialBall = (): Ball => ({
-  x: -3,
-  y: 9.1,
+export type Board = {
+  start: { x: number; y: number };
+  target: typeof TARGET;
+  fixed: Piece[];
+  star?: { x: number; y: number };
+};
+export const DEFAULT_BOARD: Board = {
+  start: { x: -3, y: 9.1 },
+  target: TARGET,
+  fixed: [],
+};
+export const initialBall = (board: Board = DEFAULT_BOARD): Ball => ({
+  x: board.start.x,
+  y: board.start.y,
   vx: 0,
   vy: 0,
   time: 0,
   hits: 0,
+  collected: false,
   status: 'running',
 });
-export function step(ball: Ball, pieces: readonly Piece[], dt = STEP): Ball {
+export function step(
+  ball: Ball,
+  pieces: readonly Piece[],
+  dt = STEP,
+  board: Board = DEFAULT_BOARD,
+): Ball {
   if (ball.status !== 'running') return ball;
   const b = { ...ball, time: ball.time + dt };
   b.vy -= 7 * dt;
   b.x += b.vx * dt;
   b.y += b.vy * dt;
-  for (const piece of pieces) {
+  for (const piece of [...board.fixed, ...pieces]) {
     const s = SLOTS[piece.slot];
     if (!s) continue;
     let nx: number, ny: number, penetration: number;
@@ -86,19 +104,25 @@ export function step(ball: Ball, pieces: readonly Piece[], dt = STEP): Ball {
     b.y = 10;
     b.vy = -Math.abs(b.vy) * 0.5;
   }
+  if (board.star && Math.hypot(b.x - board.star.x, b.y - board.star.y) < 0.42)
+    b.collected = true;
+  const target = board.target;
   // Only a downward crossing through the cup opening counts as a win.
   if (
-    ball.y >= TARGET.y &&
-    b.y < TARGET.y &&
+    ball.y >= target.y &&
+    b.y < target.y &&
     b.vy < 0 &&
-    Math.abs(b.x - TARGET.x) < TARGET.width / 2 - RADIUS
+    Math.abs(b.x - target.x) < target.width / 2 - RADIUS
   )
     b.status = 'won';
   else if (b.y < -0.35 || b.time > 18) b.status = 'lost';
   return b;
 }
-export function simulate(pieces: readonly Piece[]): Ball {
-  let b = initialBall();
-  while (b.status === 'running') b = step(b, pieces);
+export function simulate(
+  pieces: readonly Piece[],
+  board: Board = DEFAULT_BOARD,
+): Ball {
+  let b = initialBall(board);
+  while (b.status === 'running') b = step(b, pieces, STEP, board);
   return b;
 }
